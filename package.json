@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "chalk": "^2.3.0",
+    "inquirer": "^5.0.0",
+    "moment": "^2.20.1"
+  }
+}
