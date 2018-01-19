@@ -1,5 +1,7 @@
 ### 简单的实现P2P聊天
 
+[![Greenkeeper badge](https://badges.greenkeeper.io/axetroy/p.svg)](https://greenkeeper.io/)
+
 这里说的P2P不是基于Websocket的聊天应用.
 
 而是基于底层的udp协议, 依靠初始化服务器，实现内网穿透.
