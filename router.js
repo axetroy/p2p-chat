@@ -5,8 +5,6 @@ const readline = require("readline");
 const chalk = require("chalk");
 const moment = require("moment");
 
-const user = {};
-
 const PORT = process.env.PORT || 1099;
 
 const port = parseInt(process.argv[2]); // router port
@@ -17,7 +15,7 @@ let name = process.env.NAME;
 
 function isMessage(msg) {
   try {
-    const data = JSON.parse(msg);
+    JSON.parse(msg);
     return true;
   } catch (err) {
     return false;
@@ -27,17 +25,69 @@ function isMessage(msg) {
 class Server extends EventEmitter {
   constructor() {
     super();
-    const udp = (this.udp = dgram.createSocket(
-      "udp4",
-      this.message.bind(this)
-    ));
+    this.logined = false; // 是否已连接到p2p网络
+    this.networks = []; // p2p网络节点列表
+    this.connection = null;
+    const udp = (this.udp = dgram.createSocket("udp4", (message, ipAddress) => {
+      message = message.toString();
+      if (!isMessage(message)) return;
+      const data = JSON.parse(message);
+      const { name, action, payload } = data;
+      switch (action) {
+        case "newNode":
+          this.onNewNode(payload);
+          break;
+        case "login":
+          this.onLogin(name, payload, ipAddress);
+          break;
+        case "logout":
+          break;
+        case "logined":
+          this.onLogined(name, payload, ipAddress);
+          break;
+        case "requestConnect":
+          this.onRequestConnect(name, payload, ipAddress);
+          break;
+        case "connect":
+          this.onConnect(name, payload, ipAddress);
+          break;
+        case "connected":
+          this.onConnected(name, payload, ipAddress);
+          break;
+        case "message":
+          this.onMessage(name, payload, ipAddress);
+          break;
+        default:
+          console.log(
+            `Invalid action type '${data.action}' from ${ipAddress.address}:${
+              ipAddress.port
+            }`
+          );
+      }
+    }));
     udp.on("error", function(err) {
       console.error(err);
     });
     udp.on("close", function() {
       console.log("connection close.");
     });
-    this.connection = null;
+
+    // 在程序退出之前，退出p2p网络
+    process.on("exit", () => {
+      if (this.logined) {
+        // 广播网络
+        this.networks.forEach(n => {
+          this.dispatch(
+            {
+              name,
+              action: "logout"
+            },
+            n.port,
+            n.host
+          );
+        });
+      }
+    });
   }
   waitForConnection() {
     return new Promise((resolve, reject) => {
@@ -59,99 +109,170 @@ class Server extends EventEmitter {
     return this.udp.bind(port, cb);
   }
 
+  onNewNode(ipAddress) {
+    const node = this.networks.find(network => {
+      return (
+        network &&
+        network.address === ipAddress.address &&
+        network.port === ipAddress.port
+      );
+    });
+    // 如果节点未存在，则加入
+    if (!node) {
+      this.networks.push({
+        name,
+        ...ipAddress
+      });
+    }
+  }
+
   /**
-   * 处理接受的消息
+   * 当有人登陆当前节点时
+   * @param name 连接者的名字
+   * @param data 空对象
+   * @param ipAddress 连接者的ip信息
+   */
+  onLogin(name, data, ipAddress) {
+    // 广播其他节点，有新节点加入
+    this.networks.forEach(network => {
+      this.dispatch(
+        {
+          name,
+          action: "newNode",
+          payload: {
+            name,
+            ...ipAddress
+          }
+        },
+        network.port,
+        network.address
+      );
+    });
+
+    this.onNewNode({
+      name,
+      ...ipAddress
+    });
+
+    // 告诉登录者，加入网络成功, 并同步节点
+    this.dispatch(
+      {
+        name,
+        action: "logined",
+        payload: this.networks
+      },
+      ipAddress.port,
+      ipAddress.address
+    );
+  }
+
+  /**
+   * 当前节点登陆P2P网络之后的回调函数， 主要是获取当前存在的节点
+   * @param name
    * @param data
    * @param ipAddress
    */
-  message(data, ipAddress) {
-    const msg = data.toString();
-    if (isMessage(msg)) {
-      const data = JSON.parse(msg);
-      const payload = data.payload;
-      user[data.name] = {
-        ...ipAddress
-      };
-
-      switch (data.action) {
-        // 登录
-        case "login":
-          user[data.name] = {
-            ...ipAddress,
-            name: data.name
-          };
-          // 告诉登录者，将入网络成功
-          this.dispatch(
-            {
-              name,
-              action: "logined",
-              timestamp: parseInt(new Date().getTime() / 1000)
-            },
-            ipAddress.port,
-            ipAddress.address
-          );
-          break;
-        case "logined":
-          break;
-        // 与某某某创建连接
-        case "connect":
-          // 如果不知道发送给谁
-          if (!payload.name) {
-            return;
-          }
-
-          const target = user[payload.name];
-
-          // 如果用户不存在
-          if (!target) {
-            return;
-          }
-
-          // 通知主动连接方，连接成功
-          this.dispatch(
-            {
-              action: "connected",
-              payload: {
-                name: payload.name,
-                ...target
-              },
-              timestamp: parseInt(new Date().getTime() / 1000)
-            },
-            ipAddress.port,
-            ipAddress.host
-          );
-
-          // 通知被动连接方，连接成功
-          this.dispatch(
-            {
-              action: "connected",
-              payload: {
-                name: data.name,
-                ...ipAddress
-              },
-              timestamp: parseInt(new Date().getTime() / 1000)
-            },
-            target.port,
-            target.host
-          );
-
-          break;
-        // 接受到消息
-        case "connected":
-          console.log(
-            `connect with ${chalk.green(payload.address + ":" + payload.port)}`
-          );
-          this.connection = payload;
-          break;
-        case "message":
-          console.log(
-            `${moment(new Date(data.timestamp * 1000)).format(
-              "YYYY-MM-DD HH:mm:ss"
-            )} ${chalk.yellow(data.name)}: ${chalk.green(payload)}`
-          );
-          break;
+  onLogined(name, data, ipAddress) {
+    let network;
+    while ((network = data.shift())) {
+      if (!this.networks.find(n => n.name === network.name)) {
+        this.networks.push(network);
       }
     }
+  }
+
+  /**
+   * 有人请求连接到当前节点
+   * @param from 是谁请求的
+   * @param data 请求体
+   * @param ipAddress
+   */
+  onRequestConnect(from, data, ipAddress) {
+    // 如果当前还没有于它建立连接
+    if (this.connection !== from) {
+      this.dispatch(
+        {
+          name,
+          action: "requestConnect"
+        },
+        ipAddress.port,
+        ipAddress.address
+      );
+      this.connection = {
+        name: from,
+        ...ipAddress
+      };
+    }
+  }
+
+  /**
+   * 当节点有人连接进来时
+   * @param name
+   * @param data
+   * @param ipAddress
+   */
+  onConnect(name, data, ipAddress) {
+    // 如果不知道发送给谁
+    if (!data.name) {
+      return;
+    }
+
+    const node = this.networks.find(v => v.name === data.name);
+
+    if (!node) {
+      console.error(`Invalid address ${data.name}`);
+    }
+
+    // 通知主动连接方，连接成功
+    this.dispatch(
+      {
+        action: "connected",
+        payload: {
+          name,
+          ...node
+        }
+      },
+      ipAddress.port,
+      ipAddress.address
+    );
+
+    // 通知被动连接方，连接成功
+    this.dispatch(
+      {
+        action: "connected",
+        payload: {
+          name,
+          ...ipAddress
+        }
+      },
+      node.port,
+      node.address
+    );
+  }
+
+  /**
+   * 当节点连接到P2P网络成功时触发
+   * @param name
+   * @param data
+   * @param ipAddress
+   */
+  onConnected(name, data, ipAddress) {
+    console.log(`connect with ${chalk.green(data.address + ":" + data.port)}`);
+    this.connection = data;
+  }
+
+  /**
+   * 当节点收到消息时
+   * @param name
+   * @param data
+   * @param ipAddress
+   */
+  onMessage(name, data, ipAddress) {
+    console.log(
+      `${moment().format("YYYY-MM-DD HH:mm:ss")} ${chalk.yellow(
+        name
+      )}: ${chalk.green(data)}`
+    );
   }
 
   /**
@@ -163,7 +284,12 @@ class Server extends EventEmitter {
   dispatch(data, port, host) {
     return new Promise((resolve, reject) => {
       this.udp.send(
-        Buffer.from(JSON.stringify(data)),
+        Buffer.from(
+          JSON.stringify({
+            ...data,
+            ...{ timestamp: parseInt(new Date().getTime() / 1000) }
+          })
+        ),
         port,
         host,
         (err, data) => {
@@ -193,6 +319,7 @@ async function main() {
     if (err) {
       console.error(err);
     } else {
+      console.log("Listen on port", PORT);
     }
   });
 
@@ -201,8 +328,7 @@ async function main() {
     await app.dispatch(
       {
         name,
-        action: "login",
-        timestamp: parseInt(new Date().getTime() / 1000)
+        action: "login"
       },
       port,
       host
@@ -230,18 +356,30 @@ async function main() {
 
       const to = anwsers.name;
 
-      await app.dispatch(
-        {
-          name,
-          action: "connect",
-          payload: { name: to }, // I wanna talk to this guy
-          timestamp: parseInt(new Date().getTime() / 1000)
-        },
-        port,
-        host
-      );
+      const network = app.networks.find(net => net && net.name === to);
 
-      console.log(`Connecting...`);
+      // 如果没有发现节点
+      if (!network) {
+        await app.dispatch(
+          {
+            name,
+            action: "connect",
+            payload: { name: to } // I wanna talk to this guy
+          },
+          port,
+          host
+        );
+      } else {
+        await app.dispatch(
+          {
+            name,
+            action: "requestConnect"
+          },
+          network.port,
+          network.address
+        );
+        app.connection = network;
+      }
 
       await app.waitForConnection();
 
@@ -269,8 +407,7 @@ async function main() {
           {
             name,
             action: "message",
-            payload: input,
-            timestamp: parseInt(new Date().getTime() / 1000)
+            payload: input
           },
           app.connection.port,
           app.connection.address
@@ -303,8 +440,7 @@ async function main() {
           {
             name,
             action: "message",
-            payload: input,
-            timestamp: parseInt(new Date().getTime() / 1000)
+            payload: input
           },
           app.connection.port,
           app.connection.address
